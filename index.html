@@ -682,8 +682,11 @@
     <button class="btn btn-primary" id="huntBtn" onclick="startHunt()">
       <span>⚡</span> Hunt Prospects
     </button>
+    <button class="btn btn-secondary" id="rawBtn" onclick="rawScan()">
+      🔍 Raw Scan (no AI)
+    </button>
     <button class="btn btn-secondary" onclick="previewPlan()">
-      🗺 Preview Keyword Plan
+      🗺 Keyword Plan
     </button>
     <button class="btn btn-secondary" onclick="clearResults()">
       ✕ Clear
@@ -761,10 +764,12 @@
 
 <script>
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-const BACKEND = "https://leadfinder.adpandeys35.workers.dev"; // ← your deployed worker
+const BACKEND = "https://leadfinder.adpandeys35.workers.dev";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let allProspects = [];
+let rawPosts     = [];
+let viewMode     = 'prospects'; // 'prospects' | 'raw'
 let isHunting    = false;
 
 // ─── Toggle chips ─────────────────────────────────────────────────────────────
@@ -776,6 +781,79 @@ document.querySelectorAll('.toggle-chip').forEach(chip => {
   });
 });
 
+// ─── Raw Scan — NO AI, just shows what Reddit returns ─────────────────────────
+async function rawScan() {
+  const desc = document.getElementById('targetDesc').value.trim();
+  if (!desc) { toast('Enter a target description first'); return; }
+  if (isHunting) return;
+
+  isHunting = true;
+  const btn = document.getElementById('rawBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Scanning...';
+
+  showStatus('Fetching raw Reddit posts (no AI)...');
+  document.getElementById('statsRow').classList.remove('visible');
+  document.getElementById('filterBar').classList.remove('visible');
+  document.getElementById('exportBar').classList.remove('visible');
+
+  try {
+    const res = await fetch(`${BACKEND}/api/raw`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        business_description: desc,
+        time_window: document.getElementById('timeWindow').value,
+        max_results: 50,
+        deep_mode: false,
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Worker ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+
+    rawPosts  = data.posts || [];
+    viewMode  = 'raw';
+    allProspects = rawPosts; // reuse same render pipeline
+
+    document.getElementById('statTotal').textContent    = (data.total_scraped || 0).toLocaleString();
+    document.getElementById('statAnalyzed').textContent = rawPosts.length;
+    document.getElementById('statProspects').textContent = rawPosts.length;
+    document.getElementById('statHot').textContent      = rawPosts.filter(p => (p.heuristic_score||0) >= 50).length;
+    document.getElementById('statsRow').classList.add('visible');
+
+    if (data.keywords_used) {
+      document.getElementById('icpBox').innerHTML =
+        `<strong>🔍 Raw Scan Mode</strong> — showing unfiltered Reddit posts<br>` +
+        `<strong>Keywords used:</strong> ${data.keywords_used.slice(0,10).join(', ')}...<br>` +
+        `<strong>Note:</strong> ${data.note || ''}`;
+      document.getElementById('icpBox').classList.add('visible');
+    }
+
+    if (rawPosts.length) {
+      document.getElementById('filterBar').classList.add('visible');
+      document.getElementById('exportBar').classList.add('visible');
+      renderFiltered();
+      toast(`🔍 Raw scan: ${rawPosts.length} posts found`);
+    } else {
+      document.getElementById('results').innerHTML = `
+        <div class="empty-state">
+          <span class="icon">😶</span>
+          <h3>Reddit returned 0 posts</h3>
+          <p>Reddit may be rate limiting the worker. Try again in 30 seconds.</p>
+        </div>`;
+    }
+  } catch(e) {
+    toast(`❌ ${e.message}`, true);
+    document.getElementById('results').innerHTML = `<div class="empty-state"><span class="icon">⚠️</span><h3>${e.message}</h3></div>`;
+  } finally {
+    isHunting = false;
+    btn.disabled = false;
+    btn.textContent = '🔍 Raw Scan (no AI)';
+    hideStatus();
+  }
+}
+
 // ─── Hunt ─────────────────────────────────────────────────────────────────────
 async function startHunt() {
   const desc = document.getElementById('targetDesc').value.trim();
@@ -783,9 +861,10 @@ async function startHunt() {
   if (isHunting) return;
 
   isHunting = true;
+  viewMode  = 'prospects';
   const btn = document.getElementById('huntBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="pulse-dot" style="width:8px;height:8px;border-radius:50%;background:#0a0a0f;animation:pulse 1.2s infinite;flex-shrink:0"></span> Hunting...';
+  btn.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#0a0a0f;animation:pulse 1.2s infinite"></span> Hunting...';
 
   showStatus('Analyzing your target profile...');
   document.getElementById('statsRow').classList.remove('visible');
@@ -793,78 +872,88 @@ async function startHunt() {
   document.getElementById('exportBar').classList.remove('visible');
   document.getElementById('icpBox').classList.remove('visible');
 
-  const activeTypes = [...document.querySelectorAll('.toggle-chip.active')]
-    .map(c => c.dataset.val);
+  const activeTypes = [...document.querySelectorAll('.toggle-chip.active')].map(c => c.dataset.val);
 
   const payload = {
     business_description: desc,
-    time_window:          document.getElementById('timeWindow').value,
-    max_results:          parseInt(document.getElementById('maxResults').value),
-    filter_min_lead:      parseInt(document.getElementById('minScore').value),
-    deep_mode:            document.getElementById('deepMode').value === 'true',
-    include_comments:     true,
-    prospect_types:       activeTypes,
-    mode:                 'prospect_hunter', // tells worker this is outbound mode
+    time_window:     document.getElementById('timeWindow').value,
+    max_results:     parseInt(document.getElementById('maxResults').value),
+    filter_min_lead: parseInt(document.getElementById('minScore').value),
+    deep_mode:       document.getElementById('deepMode').value === 'true',
+    include_comments: true,
+    prospect_types:  activeTypes,
   };
 
   try {
-    showStatus('Scanning Reddit for fresh prospects...');
-    const res  = await fetch(`${BACKEND}/api/scrape`, {
-      method:  'POST',
+    showStatus('Scanning Reddit + running AI analysis...');
+    const res = await fetch(`${BACKEND}/api/scrape`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(payload),
+      body: JSON.stringify(payload),
     });
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Worker returned ${res.status}: ${err}`);
-    }
-
+    if (!res.ok) throw new Error(`Worker ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
-    showStatus('Processing results...');
     allProspects = data.leads || [];
+    rawPosts     = data.raw_preview || [];
 
-    // Stats
     document.getElementById('statTotal').textContent     = (data.total_scraped || 0).toLocaleString();
     document.getElementById('statAnalyzed').textContent  = (data.total_analyzed || 0).toLocaleString();
     document.getElementById('statProspects').textContent = allProspects.length;
-    document.getElementById('statHot').textContent       = allProspects.filter(p => p.lead_score >= 7).length;
-
+    document.getElementById('statHot').textContent       = allProspects.filter(p => (p.lead_score||0) >= 7).length;
     document.getElementById('statsRow').classList.add('visible');
 
-    if (data.icp) {
-      document.getElementById('icpBox').innerHTML =
-        `<strong>🎯 Target ICP:</strong> ${data.icp}` +
-        (data.business_type ? ` &nbsp;·&nbsp; <strong>Mode:</strong> ${data.business_type}` : '') +
-        (data.keywords_used ? `<br><strong>Keywords used:</strong> ${data.keywords_used.slice(0,8).join(', ')}...` : '');
+    // Build ICP box — always show keywords + raw preview info
+    let icpHtml = '';
+    if (data.icp) icpHtml += `<strong>🎯 ICP:</strong> ${escHtml(data.icp)}<br>`;
+    if (data.keywords_used) icpHtml += `<strong>Keywords:</strong> ${data.keywords_used.slice(0,8).join(', ')}...<br>`;
+    if (data.used_fallback) icpHtml += `<span style="color:var(--warn)">⚠️ AI returned 0 — showing heuristic fallback matches. Try Raw Scan to see what was found.</span><br>`;
+    if (rawPosts.length && allProspects.length === 0) {
+      icpHtml += `<span style="color:var(--warn)">ℹ️ Reddit found ${rawPosts.length} posts but AI filtered them all. Showing top raw posts below instead.</span>`;
+    }
+    if (icpHtml) {
+      document.getElementById('icpBox').innerHTML = icpHtml;
       document.getElementById('icpBox').classList.add('visible');
+    }
+
+    // If AI gave 0, show raw posts so user always sees something
+    if (allProspects.length === 0 && rawPosts.length > 0) {
+      allProspects = rawPosts.map(p => ({
+        ...p,
+        lead_score: Math.min(Math.round((p.heuristic_score||0) / 8), 9),
+        prospect_type: 'unclassified',
+        urgency: 'medium',
+        decision_stage: 'researching',
+        contact_ok: true,
+        outreach_angle: 'Saw your Reddit post — we find high-intent leads for businesses. Want a free sample?',
+        _raw_fallback: true,
+      }));
     }
 
     if (allProspects.length) {
       document.getElementById('filterBar').classList.add('visible');
       document.getElementById('exportBar').classList.add('visible');
       renderFiltered();
-      toast(`✅ Found ${allProspects.length} prospects!`);
+      const label = data.used_fallback || allProspects.some(p => p._raw_fallback)
+        ? `⚡ ${allProspects.length} posts shown (heuristic mode — check Raw Scan)`
+        : `✅ Found ${allProspects.length} prospects!`;
+      toast(label);
     } else {
       document.getElementById('results').innerHTML = `
         <div class="empty-state">
           <span class="icon">😶</span>
           <h3>No prospects found</h3>
-          <p>Try broadening your description or switching to Deep mode.</p>
-          ${data.message ? `<p style="margin-top:8px;font-size:11px;color:var(--muted2)">${data.message}</p>` : ''}
+          <p>Try clicking <strong>🔍 Raw Scan</strong> to see if Reddit is returning posts at all.</p>
+          ${data.message ? `<p style="margin-top:8px;font-size:11px;color:var(--muted2)">${escHtml(data.message)}</p>` : ''}
         </div>`;
     }
 
-  } catch (e) {
+  } catch(e) {
     console.error(e);
-    toast(`❌ Error: ${e.message}`, true);
+    toast(`❌ ${e.message}`, true);
     document.getElementById('results').innerHTML = `
-      <div class="empty-state">
-        <span class="icon">⚠️</span>
-        <h3>Something went wrong</h3>
-        <p>${e.message}</p>
-      </div>`;
+      <div class="empty-state"><span class="icon">⚠️</span><h3>Error</h3><p>${escHtml(e.message)}</p></div>`;
   } finally {
     isHunting = false;
     btn.disabled = false;
@@ -877,161 +966,129 @@ async function startHunt() {
 async function previewPlan() {
   const desc = document.getElementById('targetDesc').value.trim();
   if (!desc) { toast('Enter a target description first'); return; }
-
   showStatus('Generating keyword plan...');
   try {
     const res  = await fetch(`${BACKEND}/api/plan`, {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ business_description: desc }),
+      body: JSON.stringify({ business_description: desc }),
     });
     const data = await res.json();
-
-    const kws  = (data.searchKeywords || []).join(', ');
-    const subs = (data.targetSubreddits || []).join(', r/');
     document.getElementById('icpBox').innerHTML =
-      `<strong>🗺 Keyword Plan Preview</strong><br>` +
-      `<strong>ICP:</strong> ${data.icp || 'N/A'}<br>` +
-      `<strong>Keywords (${(data.searchKeywords||[]).length}):</strong> ${kws}<br>` +
-      `<strong>Subreddits:</strong> r/${subs}`;
+      `<strong>🗺 Keyword Plan</strong><br>` +
+      `<strong>ICP:</strong> ${escHtml(data.icp || 'N/A')}<br>` +
+      `<strong>Keywords (${(data.searchKeywords||[]).length}):</strong> ${(data.searchKeywords||[]).join(', ')}<br>` +
+      `<strong>Subreddits:</strong> r/${(data.targetSubreddits||[]).join(', r/')}`;
     document.getElementById('icpBox').classList.add('visible');
     toast('Plan ready ↑');
   } catch(e) {
     toast(`Error: ${e.message}`, true);
-  } finally {
-    hideStatus();
-  }
+  } finally { hideStatus(); }
 }
 
 // ─── Render ────────────────────────────────────────────────────────────────────
 function renderFiltered() {
-  const search  = document.getElementById('searchFilter').value.toLowerCase();
-  const sort    = document.getElementById('sortFilter').value;
-  const typeF   = document.getElementById('typeFilter').value;
+  const search = document.getElementById('searchFilter').value.toLowerCase();
+  const sort   = document.getElementById('sortFilter').value;
+  const typeF  = document.getElementById('typeFilter').value;
 
   let filtered = allProspects.filter(p => {
-    if (typeF && p.prospect_type !== typeF) return false;
+    if (typeF && p.prospect_type !== typeF && !p._raw_fallback) return false;
     if (search) {
-      const hay = ((p.title||'') + (p.body||'') + (p.author||'') + (p.subreddit||'')).toLowerCase();
+      const hay = ((p.title||'')+(p.body||'')+(p.author||'')+(p.subreddit||'')).toLowerCase();
       if (!hay.includes(search)) return false;
     }
     return true;
   });
 
-  if (sort === 'score')   filtered.sort((a,b) => (b.lead_score||0) - (a.lead_score||0));
+  if (sort === 'score')   filtered.sort((a,b) => ((b.lead_score||b.heuristic_score||0)) - ((a.lead_score||a.heuristic_score||0)));
   if (sort === 'urgency') filtered.sort((a,b) => urgencyVal(b.urgency) - urgencyVal(a.urgency));
   if (sort === 'recent')  filtered.sort((a,b) => new Date(b.created_at||0) - new Date(a.created_at||0));
 
-  document.getElementById('filteredCount').textContent = `${filtered.length} prospects`;
-  document.getElementById('exportCount').textContent   = `${filtered.length} prospects ready to export`;
+  document.getElementById('filteredCount').textContent = `${filtered.length} results`;
+  document.getElementById('exportCount').textContent   = `${filtered.length} ready to export`;
 
   if (!filtered.length) {
-    document.getElementById('results').innerHTML = `
-      <div class="empty-state">
-        <span class="icon">🔍</span>
-        <h3>No matches</h3>
-        <p>Try adjusting your filters.</p>
-      </div>`;
+    document.getElementById('results').innerHTML = `<div class="empty-state"><span class="icon">🔍</span><h3>No matches</h3><p>Try adjusting filters.</p></div>`;
     return;
   }
 
-  document.getElementById('results').innerHTML =
-    filtered.map((p, i) => buildCard(p, i)).join('');
+  document.getElementById('results').innerHTML = filtered.map((p, i) => buildCard(p, i)).join('');
 }
 
-function urgencyVal(u) {
-  return u === 'high' ? 3 : u === 'medium' ? 2 : 1;
-}
+function urgencyVal(u) { return u === 'high' ? 3 : u === 'medium' ? 2 : 1; }
 
 function buildCard(p, idx) {
-  const score = p.lead_score || 0;
-  const scoreClass = score >= 7 ? 'score-hot' : score >= 5 ? 'score-warm' : 'score-cold';
-  const scoreLabel = score >= 7 ? '🔥 ' + score : score >= 5 ? '⚡ ' + score : score;
+  const isRaw   = p._raw_fallback || p.heuristic_score != null;
+  const score   = p.lead_score || (isRaw ? Math.min(Math.round((p.heuristic_score||0)/8),9) : 0);
+  const scoreClass = score >= 7 ? 'score-hot' : score >= 4 ? 'score-warm' : 'score-cold';
+  const scoreLabel = score >= 7 ? '🔥 ' + score : score >= 4 ? '⚡ ' + score : '· ' + score;
 
-  const stageLabel = {
-    ready_to_buy: '💰 Ready to Buy',
-    evaluating:   '🤔 Evaluating',
-    researching:  '🔍 Researching',
-    awareness:    '👀 Awareness',
-  }[p.decision_stage] || p.decision_stage || '';
+  const stageMap = { ready_to_buy:'💰 Ready to Buy', evaluating:'🤔 Evaluating', researching:'🔍 Researching', awareness:'👀 Awareness' };
+  const typeMap  = { new_agency:'🏢 New Agency', new_saas:'🚀 New SaaS', needs_customers:'🎯 Needs Customers', needs_leads:'🔥 Needs Leads', just_launched:'⚡ Just Launched', looking_for_growth:'📈 Growth', unclassified:'📄 Raw Post' };
 
-  const intentLabel = {
-    new_agency:       '🏢 New Agency',
-    new_saas:         '🚀 New SaaS',
-    needs_customers:  '🎯 Needs Customers',
-    needs_leads:      '🔥 Needs Leads',
-    just_launched:    '⚡ Just Launched',
-    looking_for_growth: '📈 Growth',
-    pain_point:       '😤 Pain Point',
-  }[p.intent || p.prospect_type] || p.intent || '';
+  const stageLabel = stageMap[p.decision_stage] || '';
+  const typeLabel  = typeMap[p.intent || p.prospect_type] || p.prospect_type || '';
 
-  const postUrl = p.url || `https://reddit.com`;
+  const postUrl = p.url || 'https://reddit.com';
   const userUrl = p.author ? `https://reddit.com/u/${p.author}` : null;
   const title   = (p.title || 'Untitled post').slice(0, 120);
   const body    = (p.body  || '').slice(0, 280);
-
-  const delay = Math.min(idx * 0.04, 1);
+  const delay   = Math.min(idx * 0.035, 1.2);
 
   return `
-  <div class="prospect-card" style="animation-delay:${delay}s">
+  <div class="prospect-card" style="animation-delay:${delay}s${isRaw && !p.lead_score ? ';border-color:rgba(245,158,11,0.2)' : ''}">
     <div class="card-top">
-      <div class="card-title">
-        <a href="${postUrl}" target="_blank" rel="noopener">${escHtml(title)}</a>
-      </div>
+      <div class="card-title"><a href="${postUrl}" target="_blank" rel="noopener">${escHtml(title)}</a></div>
       <div class="score-badge ${scoreClass}">${scoreLabel}</div>
     </div>
-
     <div class="card-meta">
       <span class="meta-chip chip-sub">r/${escHtml(p.subreddit||'?')}</span>
-      <span class="meta-chip chip-type">${p.type || 'post'}</span>
-      ${intentLabel   ? `<span class="meta-chip chip-stage">${intentLabel}</span>` : ''}
-      ${stageLabel    ? `<span class="meta-chip chip-warn">${stageLabel}</span>` : ''}
+      <span class="meta-chip chip-type">${p.type||'post'}</span>
+      ${typeLabel  ? `<span class="meta-chip chip-stage">${typeLabel}</span>` : ''}
+      ${stageLabel ? `<span class="meta-chip chip-warn">${stageLabel}</span>` : ''}
       ${p.urgency === 'high' ? `<span class="meta-chip chip-warn">🚨 Urgent</span>` : ''}
-      ${p.budget_signal ? `<span class="meta-chip chip-warn">💵 Budget Signal</span>` : ''}
+      ${p.budget_signal ? `<span class="meta-chip chip-warn">💵 Budget</span>` : ''}
       ${p.contact_ok    ? `<span class="meta-chip chip-stage">✉️ Open to DM</span>` : ''}
+      ${isRaw && !p.lead_score ? `<span class="meta-chip" style="background:rgba(245,158,11,0.1);color:var(--warn);border:1px solid rgba(245,158,11,0.2)">🔍 Raw · ${p.heuristic_score||0}pts</span>` : ''}
       ${userUrl ? `<a class="meta-chip chip-user" href="${userUrl}" target="_blank">u/${escHtml(p.author||'anon')}</a>` : ''}
     </div>
-
     ${body ? `<div class="card-body">${escHtml(body)}</div>` : ''}
-
-    ${p.outreach_angle ? `
-    <div class="outreach-box">
-      <div class="outreach-label">💬 Outreach Angle</div>
-      ${escHtml(p.outreach_angle)}
-    </div>` : ''}
-
+    ${p.outreach_angle ? `<div class="outreach-box"><div class="outreach-label">💬 Outreach Angle</div>${escHtml(p.outreach_angle)}</div>` : ''}
+    ${p.pain_summary ? `<div style="font-size:12px;color:var(--muted);margin-bottom:10px;font-style:italic">🩹 ${escHtml(p.pain_summary)}</div>` : ''}
     <div class="card-actions">
       <a class="btn-sm btn-sm-accent" href="${postUrl}" target="_blank" rel="noopener">↗ View Post</a>
       ${userUrl ? `<a class="btn-sm" href="${userUrl}" target="_blank" rel="noopener">👤 Profile</a>` : ''}
-      <button class="btn-sm" onclick="copyOutreach(this, ${idx})">📋 Copy Pitch</button>
-      ${p.why_lead ? `<button class="btn-sm" onclick="showWhy(this, '${escAttr(p.why_lead)}')">💡 Why?</button>` : ''}
+      <button class="btn-sm" onclick="copyPitch(this, ${idx})">📋 Copy Pitch</button>
+      ${p.why_lead ? `<button class="btn-sm" onclick="toast('💡 '+${JSON.stringify(p.why_lead)})">💡 Why?</button>` : ''}
     </div>
   </div>`;
 }
 
-function copyOutreach(btn, idx) {
-  const p = getFiltered()[idx];
+function copyPitch(btn, idx) {
+  const filtered = getFiltered();
+  const p = filtered[idx];
   if (!p) return;
   const text = p.outreach_angle
-    ? `Hi u/${p.author}, ${p.outreach_angle}\n\nPost: ${p.url}`
-    : `Hey u/${p.author}, saw your post: ${p.url}`;
+    ? `Hi u/${p.author}, ${p.outreach_angle}
+
+Ref: ${p.url}`
+    : `Hi u/${p.author}, saw your Reddit post and thought you might be interested in our lead gen service.
+
+${p.url}`;
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = '✅ Copied!';
     setTimeout(() => { btn.textContent = '📋 Copy Pitch'; }, 2000);
   });
 }
 
-function showWhy(btn, why) {
-  toast('💡 ' + why);
-}
-
 function getFiltered() {
   const search = document.getElementById('searchFilter').value.toLowerCase();
   const typeF  = document.getElementById('typeFilter').value;
   return allProspects.filter(p => {
-    if (typeF && p.prospect_type !== typeF) return false;
+    if (typeF && p.prospect_type !== typeF && !p._raw_fallback) return false;
     if (search) {
-      const hay = ((p.title||'') + (p.body||'') + (p.author||'') + (p.subreddit||'')).toLowerCase();
+      const hay = ((p.title||'')+(p.body||'')+(p.author||'')+(p.subreddit||'')).toLowerCase();
       if (!hay.includes(search)) return false;
     }
     return true;
@@ -1040,73 +1097,49 @@ function getFiltered() {
 
 // ─── Export ───────────────────────────────────────────────────────────────────
 function exportCSV() {
-  const prospects = getFiltered();
-  if (!prospects.length) { toast('No prospects to export'); return; }
-
-  const headers = ['score','author','subreddit','type','intent','stage','urgency','budget','contact_ok','title','url','outreach_angle','why_lead'];
-  const rows = prospects.map(p => [
-    p.lead_score, p.author, p.subreddit, p.type,
-    p.intent || p.prospect_type, p.decision_stage, p.urgency,
-    p.budget_signal ? 'yes' : 'no',
-    p.contact_ok ? 'yes' : 'no',
-    '"' + (p.title||'').replace(/"/g,'""') + '"',
-    p.url,
-    '"' + (p.outreach_angle||'').replace(/"/g,'""') + '"',
-    '"' + (p.why_lead||'').replace(/"/g,'""') + '"',
+  const list = getFiltered();
+  if (!list.length) { toast('No results to export'); return; }
+  const headers = ['score','author','subreddit','type','prospect_type','urgency','stage','budget','contact','title','url','outreach_angle','why'];
+  const rows = list.map(p => [
+    p.lead_score || p.heuristic_score || 0, p.author, p.subreddit, p.type,
+    p.prospect_type, p.urgency, p.decision_stage,
+    p.budget_signal ? 'yes' : 'no', p.contact_ok ? 'yes' : 'no',
+    '"'+(p.title||'').replace(/"/g,'""')+'"', p.url,
+    '"'+(p.outreach_angle||'').replace(/"/g,'""')+'"',
+    '"'+(p.why_lead||'').replace(/"/g,'""')+'"',
   ]);
-
-  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
-  download('prospects_' + Date.now() + '.csv', csv, 'text/csv');
-  toast(`📥 Exported ${prospects.length} prospects as CSV`);
+  const csv = [headers, ...rows].map(r => r.join(',')).join('
+');
+  download('prospects_'+Date.now()+'.csv', csv, 'text/csv');
+  toast(`📥 Exported ${list.length} rows`);
 }
 
 function exportJSON() {
-  const prospects = getFiltered();
-  if (!prospects.length) { toast('No prospects to export'); return; }
-  download('prospects_' + Date.now() + '.json', JSON.stringify(prospects, null, 2), 'application/json');
-  toast(`📋 Exported ${prospects.length} prospects as JSON`);
+  const list = getFiltered();
+  if (!list.length) { toast('No results to export'); return; }
+  download('prospects_'+Date.now()+'.json', JSON.stringify(list, null, 2), 'application/json');
+  toast(`📋 Exported ${list.length} as JSON`);
 }
 
 function download(name, content, type) {
-  const a  = document.createElement('a');
-  a.href   = URL.createObjectURL(new Blob([content], { type }));
-  a.download = name;
-  a.click();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], { type }));
+  a.download = name; a.click();
 }
 
-// ─── Utils ────────────────────────────────────────────────────────────────────
 function clearResults() {
-  allProspects = [];
-  document.getElementById('results').innerHTML = `
-    <div class="empty-state">
-      <span class="icon">🎯</span>
-      <h3>No prospects yet</h3>
-      <p>Describe who you want to sell leads to, then hit Hunt Prospects.</p>
-    </div>`;
-  document.getElementById('statsRow').classList.remove('visible');
-  document.getElementById('filterBar').classList.remove('visible');
-  document.getElementById('exportBar').classList.remove('visible');
-  document.getElementById('icpBox').classList.remove('visible');
+  allProspects = []; rawPosts = [];
+  document.getElementById('results').innerHTML = `<div class="empty-state"><span class="icon">🎯</span><h3>No prospects yet</h3><p>Describe who you want to sell leads to, then hit Hunt Prospects.</p></div>`;
+  ['statsRow','filterBar','exportBar','icpBox'].forEach(id => document.getElementById(id).classList.remove('visible'));
 }
 
 function showStatus(msg) {
   document.getElementById('statusText').textContent = msg;
   document.getElementById('statusBar').classList.add('visible');
 }
-
-function hideStatus() {
-  document.getElementById('statusBar').classList.remove('visible');
-}
-
-function escHtml(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function escAttr(s) {
-  return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-}
-
-function toast(msg, isErr = false) {
+function hideStatus() { document.getElementById('statusBar').classList.remove('visible'); }
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function toast(msg, isErr=false) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.style.borderColor = isErr ? 'rgba(248,113,113,0.4)' : '';
