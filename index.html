@@ -1108,8 +1108,7 @@ function exportCSV() {
     '"'+(p.outreach_angle||'').replace(/"/g,'""')+'"',
     '"'+(p.why_lead||'').replace(/"/g,'""')+'"',
   ]);
-  const csv = [headers, ...rows].map(r => r.join(',')).join('
-');
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   download('prospects_'+Date.now()+'.csv', csv, 'text/csv');
   toast(`📥 Exported ${list.length} rows`);
 }
